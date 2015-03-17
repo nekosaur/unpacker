@@ -1,18 +1,11 @@
 import regex
 import click
 import os
-import ctypes
 from progressbar import ProgressBar, Percentage, Bar
-from path import Path
 from unrar import rarfile
-from unrar import unrarlib
-from unrar import constants
+from path import Path
 
-
-#pattern = regex.compile('(?V1)(?<!part[\d]+)\.rar')
 first_part = regex.compile(r"(?V1)(.*)(\.part1|(?<!\.part\d+))\.rar$", regex.I)
-#pattern = regex.compile(r"(?V1)(?:part1\.rar|\.rar)")
-#(?:part(\d{1,}))?\.(?:r(\d{2})|rar)$
 
 @click.command()
 @click.argument('path', type=click.Path(exists=True,file_okay=False,resolve_path=True))
@@ -65,7 +58,7 @@ def is_first_archive(filepath):
             return True
     return False
 
-class Archive:
+class Archive(object):
     def __init__(self, file):
         click.echo("Creating Archive %s" % file.abspath())
         self.abspath = file.abspath()
