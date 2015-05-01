@@ -1,18 +1,23 @@
 import regex
 import click
 import os
+import psutil
 from progressbar import ProgressBar, Percentage, Bar
 from unrar import rarfile
-from path import Path
+from unrar import constants
+from unipath import Path, DIRS, FILES
 
-first_part = regex.compile(r"(?V1)(.*)(\.part1|(?<!\.part\d+))\.rar$", regex.I)
+first_part = regex.compile(r"(?V1)(.*)(\.part0{0,2}1|(?<!\.part\d+))\.rar$", regex.I)
+base = 1024
+size_dict = {"K":base, "M":base*base, "G":base*base*base}
 
 @click.command()
 @click.argument('path', type=click.Path(exists=True,file_okay=False,resolve_path=True))
-@click.option('--recursive', is_flag=True, help='Unpacker will search subdirectories')
+@click.option('--top', is_flag=True, help='Unpacker will treat PATH as top dir, go through one level of child folders')
 @click.option('--clean', is_flag=True, help='Unpacker will delete archives after successful extraction')
+@click.option('--buffer', default="4000M", help='Unpacker will not extract any file that will result in free space dropping below the specified buffer')
 #@click.option('--free', type=click.)
-def cli(path, recursive, clean):
+def cli(path, top, clean, buffer):
     '''Unpacker will unpack RAR files in a chosen directory and 
         optionally delete them after successful extraction.
 
@@ -20,35 +25,40 @@ def cli(path, recursive, clean):
         found in a directory. It can handle multi-part archives
         in both forms (.partX.rar and .rXX)'''
 
-    click.echo("Recursive = %s" % recursive)
-    click.echo("Cleaning = %s" % clean)
+    click.echo("Path = %s" % path)
+    click.echo("Top = %s" % top)
+    click.echo("Clean = %s" % clean)
+    click.echo("Buffer = %s" % buffer)
 
-    archives = find_archives(path, recursive)
+    dir = Path(path)
 
-    for archive in archives:
-        click.echo("Extracting file %s" % archive.abspath)
-        archive.unpack(clean)
+    if top:
+        for item in dir.listdir(filter=DIRS):
+            click.echo(item)
+            process_dir(item, clean, buffer)
+    else:
+        click.echo(dir)
+        process_dir(dir, clean, buffer)
 
     click.echo("All Done!")
 
-def do(x):
-    return False
+def process_dir(dir, clean, buffer):
+    click.echo("Parsing directory %s" % dir)
 
-def find_archives(path, recursive):
-    archives = []
-    directory = Path(path)
+    archive = find_archive(dir)
 
-    click.echo("Parsing directory %s" % directory)
-    for item in directory.files('*.rar'):
-        if item.isfile() and is_first_archive(item.abspath()):
-            archives.extend([Archive(item)])
-            break
+    if archive:
+        click.echo("Extracting file %s" % archive.abspath)
+        archive.unpack(clean, get_bytes(buffer))
 
-    if recursive:
-        for folder in directory.dirs():
-            archives.extend(find_archives(folder, recursive))
 
-    return archives
+def find_archive(dir):
+    
+    for item in dir.listdir(pattern='*.rar', filter=FILES):
+        if is_first_archive(item.resolve()):
+            return Archive(item)
+
+    return None
 
 def is_first_archive(filepath):
     if rarfile.is_rarfile(filepath):
@@ -58,12 +68,23 @@ def is_first_archive(filepath):
             return True
     return False
 
+def get_bytes(size):
+    '''converts a human readable size string (2M, 4G, etc) to bytes'''
+    postfix = size[-1:]
+    size = size[:-1]
+    mult = size_dict.get(postfix)
+    return int(size) * size_dict.get(postfix)
+
+def get_human(size, postfix):
+    div = size_dict.get(postfix)
+    return size / div
+
 class Archive(object):
     def __init__(self, file):
-        click.echo("Creating Archive %s" % file.abspath())
-        self.abspath = file.abspath()
-        self.dirpath = file.dirname()
-        self.filename = first_part.search(file.basename()).group(1)
+        click.echo("Creating Archive %s" % file.absolute())
+        self.abspath = file.absolute()
+        self.dirpath = file.parent
+        self.filename = file.stem
 
         self.parts = self.get_parts()
 
@@ -72,8 +93,8 @@ class Archive(object):
         parts = []
         directory = Path(self.dirpath)
 
-        for item in directory.walkfiles('*.r*'):
-            filepath = item.abspath()
+        for item in directory.listdir(pattern='*.r*', filter=FILES):
+            filepath = item.absolute()
             if rarfile.is_rarfile(filepath):
                 if multi_part.search(filepath):
                     parts.append(item)
@@ -98,14 +119,21 @@ class Archive(object):
 
         return total_size
 
-    def unpack(self, clean=False, destination=None):
-        if (destination == None):
-            destination = self.dirpath
+    def unpack(self, clean=False, space_buffer=None):
+        #if (destination == None):
+        #    destination = self.dirpath
+        destination = self.dirpath
 
-        callback = ProgressCallback(self.get_total_size())
+        # Check for enough free space
+        total_size = self.get_total_size()
+        free_space = psutil.disk_usage(self.dirpath).free
+        if (free_space - total_size < space_buffer):
+            click.echo("Unpacking this file would only leave %d MB free space. Skipping.." % get_human(free_space - total_size, "M"))
+            return
 
         try:
             rar = rarfile.RarFile(self.abspath)
+            callback = ProgressCallback(total_size)
             rar.extractall(destination, callback=callback._callback)
         except rarfile.BadRarFile:
             click.echo("Failed to extract %s" % self.abspath)
